@@ -355,6 +355,34 @@ func ResourceListener() *schema.Resource {
 				ForceNew:     true,
 				ValidateFunc: verify.ValidARN,
 			},
+			"mutual_authentication": {
+				Type:             schema.TypeList,
+				Optional:         true,
+				MaxItems:         1,
+				DiffSuppressFunc: verify.SuppressMissingOptionalConfigurationBlock,
+				Elem: &schema.Resource{
+					Schema: map[string]*schema.Schema{
+						"ignore_client_certificate_expiry": {
+							Type:     schema.TypeBool,
+							Optional: true,
+						},
+						"mode": {
+							Type:     schema.TypeString,
+							Optional: true,
+							ValidateFunc: validation.StringInSlice([]string{
+								"off",
+								"passthrough",
+								"verify",
+							}, true),
+						},
+						"trust_store_arn": {
+							Type:         schema.TypeString,
+							Optional:     true,
+							ValidateFunc: verify.ValidARN,
+						},
+					},
+				},
+			},
 			"port": {
 				Type:         schema.TypeInt,
 				Optional:     true,
@@ -415,6 +443,10 @@ func resourceListenerCreate(ctx context.Context, d *schema.ResourceData, meta in
 		input.Certificates[0] = &elbv2.Certificate{
 			CertificateArn: aws.String(certificateArn.(string)),
 		}
+	}
+
+	if v, ok := d.GetOk("mutual_authentication"); ok && len(v.([]interface{})) > 0 && v.([]interface{})[0] != nil {
+		input.MutualAuthentication = expandMutualAuthentication(v.([]interface{})[0].(map[string]interface{}))
 	}
 
 	if v, ok := d.GetOk("default_action"); ok && len(v.([]interface{})) > 0 {
@@ -541,6 +573,12 @@ func resourceListenerRead(ctx context.Context, d *schema.ResourceData, meta inte
 		d.Set("alpn_policy", listener.AlpnPolicy[0])
 	}
 
+	if listener.MutualAuthentication != nil {
+		if err := d.Set("mutual_authentication", []interface{}{flattenMutualAuthentication(listener.MutualAuthentication)}); err != nil {
+			return sdkdiag.AppendErrorf(diags, "setting mutual_authentication: %s", err)
+		}
+	}
+
 	sort.Slice(listener.DefaultActions, func(i, j int) bool {
 		return aws.Int64Value(listener.DefaultActions[i].Order) < aws.Int64Value(listener.DefaultActions[j].Order)
 	})
@@ -581,6 +619,10 @@ func resourceListenerUpdate(ctx context.Context, d *schema.ResourceData, meta in
 			input.Certificates[0] = &elbv2.Certificate{
 				CertificateArn: aws.String(v.(string)),
 			}
+		}
+
+		if v, ok := d.GetOk("mutual_authentication"); ok && len(v.([]interface{})) > 0 && v.([]interface{})[0] != nil {
+			input.MutualAuthentication = expandMutualAuthentication(v.([]interface{})[0].(map[string]interface{}))
 		}
 
 		if v, ok := d.GetOk("alpn_policy"); ok {
@@ -964,6 +1006,51 @@ func flattenLbListenerActions(d *schema.ResourceData, Actions []*elbv2.Action) [
 	}
 
 	return vActions
+}
+
+func flattenMutualAuthentication(attributes *elbv2.MutualAuthenticationAttributes) map[string]interface{} {
+	if attributes == nil {
+		return nil
+	}
+
+	tfMap := map[string]interface{}{}
+
+	if v := attributes.IgnoreClientCertificateExpiry; v != nil {
+		tfMap["ignore_client_certificate_expiry"] = aws.BoolValue(v)
+	}
+
+	if v := attributes.Mode; v != nil {
+		tfMap["mode"] = aws.StringValue(v)
+	}
+
+	if v := attributes.TrustStoreArn; v != nil {
+		tfMap["trust_store_arn"] = aws.StringValue(v)
+	}
+
+	return tfMap
+}
+
+func expandMutualAuthentication(tfMap map[string]interface{}) *elbv2.MutualAuthenticationAttributes {
+	if tfMap == nil {
+		return nil
+	}
+
+	attributes := &elbv2.MutualAuthenticationAttributes{}
+
+	if v, ok := tfMap["mode"]; ok && v != "" {
+		attributes.Mode = aws.String(v.(string))
+	}
+
+	if v, ok := tfMap["trust_store_arn"]; ok && v != "" {
+		attributes.TrustStoreArn = aws.String(v.(string))
+	}
+
+	// IgnoreClientCertificateExpiry is only allowed by the ELBv2 API when mode is `verify`
+	if v, ok := tfMap["ignore_client_certificate_expiry"]; ok && attributes.Mode == aws.String("verify") {
+		attributes.IgnoreClientCertificateExpiry = aws.Bool(v.(bool))
+	}
+
+	return attributes
 }
 
 func flattenAuthenticateOIDCActionConfig(config *elbv2.AuthenticateOidcActionConfig, clientSecret string) []interface{} {
